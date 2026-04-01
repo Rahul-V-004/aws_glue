@@ -296,48 +296,159 @@ Now that data is in S3, run the Crawler to catalog it.
    - `category-summary/` — Parquet files
    - `product-summary/` — Parquet files
 
-### Query with Athena (Optional but Recommended)
+### Step 10b: Query with Athena
 
-1. **Create a Crawler for the output** (or create tables manually):
-   - Create a new Crawler pointing to `s3://<your-bucket>/processed-data/enriched-orders/`
-   - Target database: `ecommerce_sales_db`
-   - Run it to register the Parquet data as a table
+Athena lets you run SQL queries directly on the Parquet files in S3. But first, Athena needs to know the schema — so we create **Glue Crawlers for the output data** to register them as tables.
 
-2. Go to **AWS Console** → search **"Athena"** → click **Athena**
-3. Set up a query result location (first time only):
-   - Click **"Settings"** → **"Manage"**
-   - Set S3 path: `s3://<your-bucket>/athena-results/`
+#### Create a Crawler for Enriched Orders
+
+1. Go to **AWS Glue** → **Crawlers** in the left sidebar
+2. Click **"Create crawler"**
+3. **Name**: `ecommerce-enriched-orders-crawler`
+4. Click **"Next"**
+5. **Data source configuration**:
+   - Click **"Add a data source"**
+   - **Data source**: S3
+   - **S3 path**: Browse to `s3://<your-bucket>/processed-data/enriched-orders/`
+   - Click **"Add an S3 data source"**
+6. Click **"Next"**
+7. **IAM role**: Select **"Choose an existing IAM role"**
+   - Choose: `ecommerce-glue-etl-role` (same role from Step 3)
+8. Click **"Next"**
+9. **Target database**: Select `ecommerce_sales_db`
+10. Click **"Next"** → Review → **"Create crawler"**
+
+#### Create a Crawler for Daily Summary
+
+1. Click **"Create crawler"** again
+2. **Name**: `ecommerce-daily-summary-crawler`
+3. **S3 path**: `s3://<your-bucket>/processed-data/daily-summary/`
+4. **IAM role**: `ecommerce-glue-etl-role`
+5. **Target database**: `ecommerce_sales_db`
+6. Click **"Create crawler"**
+
+#### Create a Crawler for Category Summary
+
+1. Click **"Create crawler"** again
+2. **Name**: `ecommerce-category-summary-crawler`
+3. **S3 path**: `s3://<your-bucket>/processed-data/category-summary/`
+4. **IAM role**: `ecommerce-glue-etl-role`
+5. **Target database**: `ecommerce_sales_db`
+6. Click **"Create crawler"**
+
+#### Create a Crawler for Product Summary
+
+1. Click **"Create crawler"** again
+2. **Name**: `ecommerce-product-summary-crawler`
+3. **S3 path**: `s3://<your-bucket>/processed-data/product-summary/`
+4. **IAM role**: `ecommerce-glue-etl-role`
+5. **Target database**: `ecommerce_sales_db`
+6. Click **"Create crawler"**
+
+#### Run All Four Crawlers
+
+1. Go to **AWS Glue** → **Crawlers**
+2. Select all 4 new crawlers (check the boxes)
+3. Click **"Run crawler"**
+4. Wait until all show status **"Ready"** (~1-2 minutes each)
+5. Verify the tables were created:
+   - Go to **Databases** → `ecommerce_sales_db` → **Tables**
+   - You should now see **5 tables**: `sales` (raw CSV), `enriched_orders`, `daily_summary`, `category_summary`, `product_summary`
+   - Click on each to verify the schema looks correct
+
+> **Note:** The table names are derived from the S3 folder names. Glue replaces hyphens with underscores, so `enriched-orders/` becomes the table `enriched_orders`.
+
+#### Set Up Athena
+
+1. Go to **AWS Console** → search **"Athena"** → click **Athena**
+2. If this is your first time using Athena, you need to set a **query result location**:
+   - Click **"Settings"** (top-right gear icon) → **"Manage"**
+   - Set **Query result location**: `s3://<your-bucket>/athena-results/`
    - Click **"Save"**
-4. Select database: `ecommerce_sales_db`
-5. Try these queries:
+3. In the **Editor** tab, select your database from the dropdown on the left:
+   - **Database**: `ecommerce_sales_db`
+4. You should see your tables listed in the left panel
+
+#### Run Queries
+
+Paste these into the Athena query editor and click **"Run"**:
 
 ```sql
--- Top 5 products by revenue
+-- 1. Preview the enriched orders data
+SELECT * FROM enriched_orders LIMIT 10;
+```
+
+```sql
+-- 2. Top 5 products by revenue
 SELECT product_name, category, price_tier, rating_tier,
-       COUNT(*) as orders, SUM(total_amount) as revenue
+       COUNT(*) as orders, ROUND(SUM(total_amount), 2) as revenue
 FROM enriched_orders
 WHERE order_status = 'completed'
 GROUP BY product_name, category, price_tier, rating_tier
 ORDER BY revenue DESC
 LIMIT 5;
+```
 
--- Revenue by day of week
-SELECT day_name, COUNT(*) as orders, 
-       ROUND(SUM(total_amount), 2) as revenue
+```sql
+-- 3. Revenue by day of week — which days do customers shop most?
+SELECT day_name, COUNT(*) as orders,
+       ROUND(SUM(total_amount), 2) as revenue,
+       ROUND(AVG(total_amount), 2) as avg_order_value
 FROM enriched_orders
 WHERE order_status = 'completed'
 GROUP BY day_name
 ORDER BY revenue DESC;
+```
 
--- Category return rates
+```sql
+-- 4. Category return rates — which categories get returned most?
 SELECT category,
        COUNT(*) as total_orders,
        SUM(CASE WHEN order_status = 'returned' THEN 1 ELSE 0 END) as returns,
-       ROUND(100.0 * SUM(CASE WHEN order_status = 'returned' THEN 1 ELSE 0 END) / COUNT(*), 1) as return_rate_pct
+       ROUND(100.0 * SUM(CASE WHEN order_status = 'returned' THEN 1 ELSE 0 END)
+             / COUNT(*), 1) as return_rate_pct
 FROM enriched_orders
 GROUP BY category
 ORDER BY return_rate_pct DESC;
 ```
+
+```sql
+-- 5. Daily summary — revenue trend over time (uses the aggregated table)
+SELECT order_date, SUM(total_orders) as orders,
+       ROUND(SUM(total_revenue), 2) as revenue,
+       SUM(unique_customers) as customers
+FROM daily_summary
+GROUP BY order_date
+ORDER BY order_date;
+```
+
+```sql
+-- 6. Product performance — best-rated vs best-selling (uses the product table)
+SELECT product_name, brand, category, times_ordered,
+       ROUND(total_revenue, 2) as revenue, api_rating, rating_tier
+FROM product_summary
+ORDER BY total_revenue DESC
+LIMIT 10;
+```
+
+```sql
+-- 7. Category performance — full overview (uses the category table)
+SELECT * FROM category_summary
+ORDER BY total_revenue DESC;
+```
+
+```sql
+-- 8. Discount impact — do discounts drive higher order values?
+SELECT has_discount,
+       COUNT(*) as orders,
+       ROUND(AVG(total_amount), 2) as avg_order_value,
+       ROUND(SUM(total_amount), 2) as total_revenue
+FROM enriched_orders
+WHERE order_status = 'completed'
+GROUP BY has_discount;
+```
+
+> **Tip:** Athena charges $5 per TB of data scanned. Since Parquet is columnar and compressed, these queries scan only a few MB — costing a fraction of a cent.
 
 ---
 
@@ -345,10 +456,15 @@ ORDER BY return_rate_pct DESC;
 
 To avoid any charges, delete everything:
 
-1. **S3**: Open your bucket → select all files → **Delete** → then **Delete bucket**
+1. **S3**: Open your bucket → select all files (including `athena-results/`) → **Delete** → then **Delete bucket**
 2. **Glue ETL Job**: Go to Glue → ETL jobs → select `ecommerce-sales-etl` → **Actions** → **Delete**
-3. **Glue Crawler**: Go to Glue → Crawlers → select `ecommerce-sales-crawler` → **Actions** → **Delete**
-4. **Glue Database**: Go to Glue → Databases → select `ecommerce_sales_db` → **Delete**
+3. **Glue Crawlers**: Go to Glue → Crawlers → select all 5 crawlers → **Actions** → **Delete**:
+   - `ecommerce-sales-crawler`
+   - `ecommerce-enriched-orders-crawler`
+   - `ecommerce-daily-summary-crawler`
+   - `ecommerce-category-summary-crawler`
+   - `ecommerce-product-summary-crawler`
+4. **Glue Database**: Go to Glue → Databases → select `ecommerce_sales_db` → **Delete** (this also deletes all tables inside it)
 5. **IAM Role**: Go to IAM → Roles → select `ecommerce-glue-etl-role` → **Delete**
 
 ## Cost
